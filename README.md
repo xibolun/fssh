@@ -18,7 +18,7 @@ fssh (flash ssh) runs commands on many hosts in parallel over SSH. It only needs
 echo remote_ssh_user=root > .fssh_env
 echo remote_ssh_user_pass="your_password" >> .fssh_env
 echo remote_ssh_options="-o PasswordAuthentication=yes -o KbdInteractiveAuthentication=yes" >> .fssh_env
-curl -fsSL https://raw.githubusercontent.com/xibolun/fssh/main/fssh.sh -o /usr/local/bin/fssh
+curl -fsSL https://raw.githubusercontent.com/xibolun/fssh/refs/heads/master/fssh.sh -o /usr/local/bin/fssh
 chmod +x /usr/local/bin/fssh
 
 echo 192.168.0.1 > tmp/ip
