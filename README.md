@@ -38,9 +38,11 @@ fssh -i 'uptime' -f tmp/ip
 
 ## Config
 .fssh_env example:
+```
 remote_ssh_user=root
 remote_ssh_user_pass="your_password"
 remote_ssh_options="-o PasswordAuthentication=yes -o KbdInteractiveAuthentication=yes"
+```
 
 ## Notes
 - Logs are written to tmp/<ip>.log.

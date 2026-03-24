@@ -38,9 +38,11 @@ fssh -i 'uptime' -f tmp/ip
 
 ## 配置
 .fssh_env 示例：
+```
 remote_ssh_user=root
 remote_ssh_user_pass="your_password"
 remote_ssh_options="-o PasswordAuthentication=yes -o KbdInteractiveAuthentication=yes"
+```
 
 ## 说明
 - 日志输出到 tmp/<ip>.log。
