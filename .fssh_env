@@ -1,0 +1,3 @@
+remote_ssh_user=root
+remote_ssh_user_pass="rootpasswd"
+remote_ssh_options="-o PasswordAuthentication=yes -o KbdInteractiveAuthentication=yes"

@@ -1,166 +1,238 @@
 #!/bin/bash
-####闪速批量并行远程执行命令脚本，120台机器的执行时间是10s内完成,开启闪速ssh优化选项后，120台机器可在2-3s内完成
+####Fast parallel remote command runner. ~120 hosts in ~10s; with fast-ssh options, ~2-3s.
 ####by laijingli2006@gmail.com
 ####2014/11/27
 
-fssh_root_dir=./
-tmp_dir=$fssh_root_dir/tmp
-log_dir=$fssh_root_dir/log
+work_dir=$(pwd)
+script_dir=$(cd "$(dirname "$0")" && pwd)
+tmp_dir=$work_dir/tmp
+log_dir=$work_dir/log
 current_time="date +%Y-%m-%d_%H:%M:%S"
 
-####指定远程主机列表或主机列表文件
-list1="
-192.168.0.110
-192.168.0.111
-"
-list2=$(cat $fssh_root_dir/ip_list_servers.txt)
-list=$list2
+list_file="$work_dir/ip_list_servers.txt"
+cmd_inline=""
+gray_ip=""
+gray_first="0"
+env_file="$work_dir/.fssh_env"
+transfer_src=""
+transfer_dst=""
+list_file_from_default="1"
+
+usage() {
+   echo "Usage: $0 [-f ip_list_file] [-i command] [-g ip] [-s src -d dst]" >&2
+}
+
+die() {
+   echo "$1" >&2
+   exit 1
+}
+
+while getopts ":f:i:g:s:d:" opt; do
+   case $opt in
+      f)
+         list_file="$OPTARG"
+         list_file_from_default="0"
+         ;;
+      i)
+         cmd_inline="$OPTARG"
+         ;;
+      g)
+         gray_ip="$OPTARG"
+         ;;
+      s)
+         transfer_src="$OPTARG"
+         ;;
+      d)
+         transfer_dst="$OPTARG"
+         ;;
+      \?)
+         usage
+         exit 1
+         ;;
+      :)
+         if [ "$OPTARG" == "g" ] ;then
+            gray_first="1"
+         else
+            die "Option -$OPTARG requires a value."
+         fi
+         ;;
+   esac
+done
+shift $((OPTIND - 1))
+
+if [ -n "$transfer_src" ] || [ -n "$transfer_dst" ] ;then
+   if [ -z "$transfer_src" ] || [ -z "$transfer_dst" ] ;then
+      die "Both -s and -d are required for file transfer."
+   fi
+   if [ ! -e "$transfer_src" ] ;then
+      die "Transfer source not found: $transfer_src"
+   fi
+fi
+
+if [ "$list_file_from_default" == "1" ] && [ ! -f "$list_file" ] && [ -f "$script_dir/ip_list_servers.txt" ] ;then
+   list_file="$script_dir/ip_list_servers.txt"
+fi
+if [ ! -f "$list_file" ] ;then
+   die "IP list file not found: $list_file"
+fi
+
+mkdir -p "$tmp_dir" "$log_dir"
+list2=$(cat "$list_file")
+if [ "$gray_first" == "1" ] && [ -z "$gray_ip" ] ;then
+  gray_ip=$(echo "$list2" | awk 'NF{print; exit}')
+fi
+if [ -n "$gray_ip" ] ;then
+  echo "$list2" | grep -Fxq "$gray_ip"
+  if [ $? != 0 ] ;then
+    die "Gray IP not found in list file: $gray_ip"
+  fi
+  list="$gray_ip"
+else
+  list=$list2
+fi
 
 
-####指定待执行的命令(适用不包含变量、特殊字符的普通命令，多个命令以;分割)或命令列表文件(适合所有命令，一条命令一行或多条命令一行以;分割)
-#cmd="date;ifconfig"
+####Command file path. Writing commands to a file avoids quoting/escaping issues.
+cmd=$work_dir/remote_cmd.txt
+cmd_mode="file"
+if [ -n "$cmd_inline" ] ;then
+    cmd="$cmd_inline"
+    cmd_mode="inline"
+fi
 
-####指定命令列表文件绝对路径，run locall script remotely:全局特殊字符转义到远程主机shell环境，通过将命令写入到文件，这样就可以避免单引号、双引号、特殊字符转义、远程变量等一系列复杂问题，兼容单独命令
-cmd=$fssh_root_dir/remote_cmd.txt
+if [ "$cmd_mode" == "file" ] && [ ! -f "$cmd" ] && [ -f "$script_dir/remote_cmd.txt" ] ;then
+   cmd="$script_dir/remote_cmd.txt"
+fi
 
-####在用户命令前执行uname，利用其记录到log中的关键字Linux判断任务是否执行成功
-#cmd="$cmd"
-#echo $cmd
+if [ "$cmd_mode" == "file" ] && [ ! -f "$cmd" ] ;then
+   if [ -n "$transfer_src" ] ;then
+      cmd_mode="none"
+   else
+      die "Command file not found: $cmd"
+   fi
+fi
 
-####加载ssh连接用户名及密码文件
-source $fssh_root_dir/.userpass.sh
+####Load SSH user/password config
+if [ ! -f "$env_file" ] && [ -f "$script_dir/.fssh_env" ] ;then
+   env_file="$script_dir/.fssh_env"
+fi
+if [ -f "$env_file" ] ;then
+   source $env_file
+else
+   die "Missing $env_file (remote_ssh_user/remote_ssh_user_pass)."
+fi
 
-####指定ssh相关参数
-####普通ssh选项，相同任务每次执行时间基本相同 (OpenSSH 5.6之前版本使用)
-#ssh_options=" -o StrictHostKeyChecking=no"
+####SSH options
 ssh_options="  -o StrictHostKeyChecking=no -o PubkeyAuthentication=no "
-####闪速ssh优化选项，采用ssh长连接复用技术,相同任务在10s内，第二次及以后执行时间在3s内 (OpenSSH 5.6之后版本使用)
-#ssh_options=" -T -q -o StrictHostKeyChecking=no -o PubkeyAuthentication=no -o ConnectTimeout=5  -o ControlMaster=auto -o ControlPath=$tmp_dir/.ssh_mux_%h_%p_%r -o ControlPersist=600s "
-####闪速ssh优化选项，启用压缩选项，在低速网络链接环境使用，采用ssh长连接复用技术,相同任务在10s内，第二次及以后执行时间在3s内 (OpenSSH 5.6之后版本使用)
-#ssh_options=" -C -tt -q -o StrictHostKeyChecking=no -o PubkeyAuthentication=no -o ConnectTimeout=5  -o ControlMaster=auto -o ControlPath=$tmp_dir/.ssh_mux_%h_%p_%r -o ControlPersist=600s"
-ssh_cmd="/usr/bin/sshpass -p${remote_ssh_user_pass} /usr/bin/ssh ${ssh_options}"
+if [ -n "$remote_ssh_options" ] ;then
+   ssh_options="$ssh_options $remote_ssh_options"
+fi
+if [ -n "$remote_ssh_user_pass" ] ;then
+  ssh_cmd=(/usr/bin/sshpass -p"$remote_ssh_user_pass" /usr/bin/ssh)
+else
+  ssh_cmd=(/usr/bin/ssh)
+fi
+ssh_cmd+=($ssh_options)
+
+if [ -n "$remote_ssh_user_pass" ] ;then
+   scp_cmd=(/usr/bin/sshpass -p"$remote_ssh_user_pass" /usr/bin/scp)
+else
+   scp_cmd=(/usr/bin/scp)
+fi
+scp_cmd+=($ssh_options)
 
 
-####初始化pid、ips数组及远程主机计数器num
+####Init pid/ip arrays and counter
 pids=()
 pid_exist_value=()
 ips=()
 num=0
-####循环主机列表执行
 for ip in $list ;do
-  #echo > $tmp_dir/$ip.log
-  #echo $ip:$cmd | tee -a $tmp_dir/$ip.log
-  #echo $ip:$cmd >> $tmp_dir/$ip.log
-  ####后台运行ssh远程命令
-  #${ssh_cmd} ${remote_ssh_user}@$ip bash -c $cmd >> $tmp_dir/$ip.log 2>&1 & 
-  ####此选项为待执行的命令为文件列表时开启
-  #${ssh_cmd} ${remote_ssh_user}@$ip bash < $cmd >> $tmp_dir/$ip.log 2>&1 &
-  ${ssh_cmd} ${remote_ssh_user}@$ip bash < $cmd > $tmp_dir/$ip.log 2>&1 &
-  #echo $! >>$tmp_dir/pid.txt
+   if [ -n "$transfer_src" ] ;then
+      scp_flags=()
+      if [ -d "$transfer_src" ] ;then
+         scp_flags=(-r)
+      fi
+      if [ "$cmd_mode" == "inline" ] ;then
+         ("${scp_cmd[@]}" "${scp_flags[@]}" "$transfer_src" ${remote_ssh_user}@$ip:"$transfer_dst" \
+            && "${ssh_cmd[@]}" ${remote_ssh_user}@$ip "$cmd") > $tmp_dir/$ip.log 2>&1 &
+      elif [ "$cmd_mode" == "file" ] ;then
+         ("${scp_cmd[@]}" "${scp_flags[@]}" "$transfer_src" ${remote_ssh_user}@$ip:"$transfer_dst" \
+            && "${ssh_cmd[@]}" ${remote_ssh_user}@$ip bash < $cmd) > $tmp_dir/$ip.log 2>&1 &
+      else
+         ("${scp_cmd[@]}" "${scp_flags[@]}" "$transfer_src" ${remote_ssh_user}@$ip:"$transfer_dst") > $tmp_dir/$ip.log 2>&1 &
+      fi
+   else
+        if [ "$cmd_mode" == "inline" ] ;then
+           "${ssh_cmd[@]}" ${remote_ssh_user}@$ip "$cmd" > $tmp_dir/$ip.log 2>&1 &
+      elif [ "$cmd_mode" == "file" ] ;then
+          "${ssh_cmd[@]}" ${remote_ssh_user}@$ip bash < $cmd > $tmp_dir/$ip.log 2>&1 &
+      else
+          echo "No command specified" > $tmp_dir/$ip.log 2>&1 &
+      fi
+   fi
   pids[$num]=$!
-  ####等待获取后台进程的退出状态值
-  #wait ${pids[$num]} > $tmp_dir/status_$ip.log &
-  ####初始化pid_exist_value数组
   pid_exist_value[$num]=255
   ips[$num]=$ip
-  #echo ${pids[$num]}----${ips[$num]}----${pid_exist_value[$num]} | tee -a $tmp_dir/pids.txt
   num=$(($num+1))
-  # echo num00000=$num
 done
 
-#exit
-
 echo ============results report:================
-#sleep 2
-
-#echo pids=${pids[*]}
-#echo  ips=${ips[*]}
 pids_length=${#pids[@]}
 echo pids_length:${pids_length}
 
 cmd_execute_start_time=`$current_time`
-#echo
 echo $cmd_execute_start_time execute reslut check loop begin:
 
 
-####循环检查pids数组中的pid是否运行结束的函数
 array_check () {
-  for i in `seq 0 $((${#pids[@]} - 1))` ;do
-    #echo -------------------------------------array for loop----------------------
-    #echo i=$i
-    #echo pids[$i]=${pids[$i]}---${ips[$i]}
-    if [  ${pids[$i]} == 0 ] ;then
-       echo NULL >/dev/null
-    else 
-       ####通过/proc目录动态检查pid是否结束,执行成功说明进程还没有结束
-       ls /proc | grep  ^${pids[$i]}$ 2>&1 >/dev/null
-       pidstatus=$?
-       #echo pidstatus=$pidstatus
-       ###if pids is not exists in /proc,that indecates the process is over,and display execute result,clean respective array elements
-       if [ $pidstatus != 0 ] ;then
-          ####进程结束后，打印执行结果log
-          echo
-          echo  "****************************** remote screen results for pids[${pids[$i]}]  ips[${ips[$i]}] ********************************"
-          #echo  pids[${pids[$i]}] remote ssh ips[${ips[$i]}] is over
-          sed -n '1,3p' $tmp_dir/${ips[$i]}.log|cut -d" " -f1|grep Linux >/dev/null 2>&1
-          cmd_excute_status=$?
-          if [  ${cmd_excute_status} == 0 ] ;then
-             #echo cmd_excute_status:${cmd_excute_status}
-             ####绿色闪烁
-             echo -e "\033[32m\033[05m执行成功\033[0m"
-             echo -e "\033[32m\033[05m$(cat $tmp_dir/${ips[$i]}.log)\033[0m"
-             pid_exist_value[$i]=0
-             complete_num_success=$((${complete_num_success}+1))
-             #echo complete_num_success_tasks:[${complete_num_success}]
-             #echo ${ips[$i]} >>/root/vps_authed.txt
-          else
-             echo -e "\033[31m\033[05m执行失败\033[0m"
-             echo -e "\033[31m\033[05m$(cat $tmp_dir/${ips[$i]}.log)\033[0m"
-             #pid_exist_value[$i]=-1
-             #echo ${ips[$i]} >>/root/vps_not_authed.txt
-        fi
-          #cat $tmp_dir/${ips[$i]}.log
-          #####同时pids数组中对应pid重置为0
-          pids[$i]=0
-          ips[$i]=0
-          #echo ${pids[*]}
-          ####进程结束，返回200供后续判断
-          return 200
-          break
-       fi
-    fi
-    ###wait for 1 seconds to check whether the pids is over
-    #sleep 3
+   for i in `seq 0 $((${#pids[@]} - 1))` ;do
+      if [ ${pids[$i]} == 0 ] ;then
+         echo NULL >/dev/null
+      else
+         ls /proc | grep  ^${pids[$i]}$ 2>&1 >/dev/null
+         pidstatus=$?
+         if [ $pidstatus != 0 ] ;then
+            echo
+            echo  "****************************** remote screen results for pids[${pids[$i]}]  ips[${ips[$i]}] ********************************"
+            wait ${pids[$i]}
+            cmd_excute_status=$?
+            if [ ${cmd_excute_status} == 0 ] ;then
+               echo -e "\033[32m\033[05mSUCCESS\033[0m"
+               printf "\033[32m\033[05m"
+               cat "$tmp_dir/${ips[$i]}.log"
+               printf "\033[0m\n"
+               pid_exist_value[$i]=0
+               complete_num_success=$((${complete_num_success}+1))
+            else
+               echo -e "\033[31m\033[05mFAILURE\033[0m"
+               printf "\033[31m\033[05m"
+               cat "$tmp_dir/${ips[$i]}.log"
+               printf "\033[0m\n"
+            fi
+            pids[$i]=0
+            ips[$i]=0
+            return 200
+            break
+         fi
+      fi
  done
 }
 
 
 complete_num=0
-#echo complete_num:${complete_num}
-#echo  pids_length:${pids_length}
-####如果完成任务数complete_num不等于pids数组长度，则循环直到所有任务结束
 while [ ${complete_num} != ${pids_length} ] ;do
-#echo =================================while loop=======================================
-for ((j=0;j<${pids_length};j++)) ;do
-   #echo ++++++++++++++++++++++++++++++ for  loop in while ++++++++++++++++++++++++++++
-   #echo complete_num:${complete_num}
-   #echo  pids_length:${pids_length}
-   #echo j:$j
-   array_check 
-   ####根据array_check函数返回值是否成功来确定complete_num数的增加
-   if [ $? == 200 ] ;then
-      complete_num=$((${complete_num}+1))
-      ####打印最近任务完成的数量
-      echo -e "\033[35m\033[05m`$current_time` Report: complete_success_tasks/complete_tasks/total_tasks:[${complete_num_success}/${complete_num}/${pids_length}]\033[0m"
-      #echo ========================================================================
-   fi
-   #sleep 1
-done
+   for ((j=0;j<${pids_length};j++)) ;do
+      array_check 
+      if [ $? == 200 ] ;then
+         complete_num=$((${complete_num}+1))
+         echo -e "\033[35m\033[05m`$current_time` Report: complete_success_tasks/complete_tasks/total_tasks:[${complete_num_success}/${complete_num}/${pids_length}]\033[0m"
+      fi
+   done
 done
 
 cmd_execute_end_time=`$current_time`
-echo $cmd_execute_end_time Good luck,all tasks has complete!
 echo
-echo 本次执行命令开始时间: $cmd_execute_start_time
-echo 本次执行命令结束时间: $cmd_execute_end_time
+echo start_at: $cmd_execute_start_time
+echo end_at: $cmd_execute_end_time
 echo
